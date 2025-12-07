@@ -8,72 +8,126 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Implémentation côté serveur du service de réservation.
+ * Gère les places, les réservations, les zones, et les notifications aux clients.
+ */
 public class ReservationServiceImpl extends UnicastRemoteObject implements IReservationService {
+
+    /** Map des places : clé = id de la place, valeur = ParkingSpot */
     private final Map<Integer, ParkingSpot> spots = new ConcurrentHashMap<>();
+
+    /** Map des réservations : clé = id réservation, valeur = Reservation */
     private final Map<String, Reservation> reservations = new ConcurrentHashMap<>();
+
+    /** Map des listeners RMI pour notifications clients */
     private final Map<String, INotificationListener> listeners = new ConcurrentHashMap<>();
+
+    /** Tarif par heure */
     private double pricePerHour = 1.0;
+
+    /** Liste des zones de parking */
     private final List<ParkingZone> zones = new ArrayList<>();
 
+    /**
+     * Constructeur
+     * @throws RemoteException
+     */
     protected ReservationServiceImpl() throws RemoteException {
-        super();
-        initZonesAndSpots();
+        super(); // exporte automatiquement l'objet RMI
+        initZonesAndSpots(); // initialisation des zones et des places
     }
 
+    /** Initialisation par défaut de quelques zones et places */
     private void initZonesAndSpots() {
-        // start with empty or some defaults; but admin can add more later
         zones.add(new ParkingZone("Centre Ville", "Zone centre"));
         zones.add(new ParkingZone("Mall", "Centre commercial"));
-        // create a few spots as example
+
+        // création de quelques places par zone
         int id = 1;
         for (ParkingZone z : zones) {
             for (int i = 1; i <= 4; i++) {
-                spots.put(id, new ParkingSpot(id, z.getName().substring(0,2).toUpperCase() + i, z.getName()));
+                spots.put(id, new ParkingSpot(
+                        id,
+                        z.getName().substring(0, 2).toUpperCase() + i,
+                        z.getName()
+                ));
                 id++;
             }
         }
     }
 
+    // ======= Méthodes client =======
+
+    /**
+     * Liste les places disponibles, optionnellement filtrées par zone
+     */
     @Override
     public synchronized List<ParkingSpot> listAvailableSpots(String region) {
         List<ParkingSpot> list = new ArrayList<>();
         for (ParkingSpot p : spots.values()) {
-            if (!p.isReserved() && (region==null || region.isEmpty() || p.getRegion().equals(region)))
+            if (!p.isReserved() && (region == null || region.isEmpty() || p.getRegion().equals(region))) {
                 list.add(p);
+            }
         }
         return list;
     }
 
+    /**
+     * Réserve une place pour un client et véhicule donnés
+     */
     @Override
     public synchronized Reservation reserveSpot(ClientInfo client, Vehicle vehicle, int spotId, int hours) throws RemoteException {
         ParkingSpot s = spots.get(spotId);
         if (s == null) throw new RemoteException("Spot introuvable");
         if (s.isReserved()) throw new RemoteException("Déjà prise");
-        s.setReserved(true);
+
+        s.setReserved(true); // marque la place comme réservée
         double amount = hours * pricePerHour;
+
         Reservation r = new Reservation(client, vehicle, s, hours, amount);
         reservations.put(r.getId(), r);
 
-        // add history per spot
-        s.addHistory(new SpotHistory(LocalDateTime.now(), "RESERVATION", "Réf: " + r.getId() + " Client: " + client.getName(), amount));
+        // ajoute un historique pour la place
+        s.addHistory(new SpotHistory(
+                LocalDateTime.now(),
+                "RESERVATION",
+                "Réf: " + r.getId() + " Client: " + client.getName(),
+                amount
+        ));
 
-        // notify client if listener registered
+        // notifie le client si un listener est enregistré
         notifyClient(client, new Notification("Réservation créée", "Réf: " + r.getId() + " Place: " + s.getLabel()));
+
         return r;
     }
 
+    /**
+     * Paiement d'une réservation
+     */
     @Override
     public synchronized boolean payReservation(String reservationId, Payment payment) throws RemoteException {
         Reservation r = reservations.get(reservationId);
         if (r == null) throw new RemoteException("Reservation introuvable");
         if (Math.abs(r.getAmount() - payment.getAmount()) > 1e-6) throw new RemoteException("Montant incorrect");
-        r.setPaid(true);
 
-        // add history entry to spot
+        r.setPaid(true); // marque comme payé
+
+        // ajoute historique sur la place
         ParkingSpot s = r.getSpot();
-        s.addHistory(new SpotHistory(LocalDateTime.now(), "PAYMENT", "Paiement reservation " + r.getId() + " par " + r.getClient().getName(), payment.getAmount()));
+        s.addHistory(new SpotHistory(
+                LocalDateTime.now(),
+                "PAYMENT",
+                "Paiement reservation " + r.getId() + " par " + r.getClient().getName(),
+                payment.getAmount()
+        ));
 
-        notifyClient(r.getClient(), new Notification("Paiement reçu", "Réf: " + reservationId + " Montant: " + payment.getAmount() + " DT"));
+        // notifie le client
+        notifyClient(r.getClient(), new Notification(
+                "Paiement reçu",
+                "Réf: " + reservationId + " Montant: " + payment.getAmount() + " DT"
+        ));
+
         return true;
     }
 
@@ -82,16 +136,19 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
         return reservations.get(reservationId);
     }
 
+    /** Enregistre un listener RMI pour notifications */
     @Override
     public void registerListener(String clientId, INotificationListener listener) throws RemoteException {
         listeners.put(clientId, listener);
     }
 
+    /** Supprime un listener */
     @Override
     public void unregisterListener(String clientId) throws RemoteException {
         listeners.remove(clientId);
     }
 
+    /** Envoie une notification à un client */
     private void notifyClient(ClientInfo client, Notification n) {
         try {
             INotificationListener l = listeners.get(client.getPhone());
@@ -108,7 +165,8 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
         return Collections.unmodifiableList(zones);
     }
 
-    // ---- Admin helpers used by AdminServiceImpl ----
+    // ======= Méthodes utilisées par AdminServiceImpl =======
+
     public synchronized Map<Integer, ParkingSpot> getSpots() {
         return spots;
     }
@@ -125,7 +183,12 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
         Reservation r = reservations.remove(id);
         if (r != null) {
             r.getSpot().setReserved(false);
-            r.getSpot().addHistory(new SpotHistory(LocalDateTime.now(), "CANCEL", "Annulation réservation " + id, 0));
+            r.getSpot().addHistory(new SpotHistory(
+                    LocalDateTime.now(),
+                    "CANCEL",
+                    "Annulation réservation " + id,
+                    0
+            ));
             return true;
         }
         return false;
@@ -143,7 +206,8 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
         return p != null;
     }
 
-    // zone management
+    // ======= Gestion des zones =======
+
     public synchronized boolean addZone(String name) {
         for (ParkingZone z : zones) if (z.getName().equalsIgnoreCase(name)) return false;
         zones.add(new ParkingZone(name, ""));
@@ -151,7 +215,7 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
     }
 
     public synchronized boolean removeZone(String name) {
-        // remove zone only if no spots in it
+        // on supprime la zone seulement si aucune place n'y est associée
         for (ParkingSpot p : spots.values()) {
             if (p.getRegion().equals(name)) return false;
         }
@@ -160,7 +224,9 @@ public class ReservationServiceImpl extends UnicastRemoteObject implements IRese
 
     public synchronized List<ParkingSpot> listSpotsByZone(String zoneName) {
         List<ParkingSpot> list = new ArrayList<>();
-        for (ParkingSpot p : spots.values()) if (p.getRegion().equals(zoneName)) list.add(p);
+        for (ParkingSpot p : spots.values()) {
+            if (p.getRegion().equals(zoneName)) list.add(p);
+        }
         return list;
     }
 }
